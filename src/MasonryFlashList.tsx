@@ -25,7 +25,12 @@ export type MasonryListRenderItem<TItem> = (
   info: MasonryListRenderItemInfo<TItem>
 ) => React.ReactElement | null;
 
-export interface MasonryFlashListProps<T>
+export interface Section<TItem> {
+  title: string;
+  data: TItem[];
+}
+
+export interface MasonryFlashListProps<T extends { type: MasonryFlashListType; originalItem: any; originalIndex: number; sectionIndex?: number; }>
   extends Omit<
     FlashListProps<T>,
     | "horizontal"
@@ -35,29 +40,15 @@ export interface MasonryFlashListProps<T>
     | "renderItem"
     | "viewabilityConfigCallbackPairs"
   > {
-  /**
-   * Allows you to change the column widths of the list. This is helpful if you want some columns to be wider than the others.
-   * e.g, if `numColumns` is `3`, you can return `2` for `index 1` and `1` for the rest to achieve a `1:2:1` split by width.
-   */
+  sections: Section<T>[];
+  renderSectionHeader: (info: { section: Section<T> }) => React.ReactElement | null;
   getColumnFlex?: (
     items: MasonryListItem<T>[],
     columnIndex: number,
     maxColumns: number,
     extraData?: any
   ) => number;
-
-  /**
-   * If enabled, MasonryFlashList will try to reduce difference in column height by modifying item order.
-   * `overrideItemLayout` is required to make this work.
-   */
   optimizeItemArrangement?: boolean;
-
-  /**
-   * Extends typical `renderItem` to include `columnIndex` and `columnSpan` (number of columns the item spans).
-   * `columnIndex` gives the consumer column information in case they might need to treat items differently based on column.
-   * This information may not otherwise be derived if using the `optimizeItemArrangement` feature, as the items will no
-   * longer be linearly distributed across the columns; instead they are allocated to the column with the least estimated height.
-   */
   renderItem: MasonryListRenderItem<T> | null | undefined;
 }
 
@@ -68,29 +59,26 @@ export interface MasonryFlashListScrollEvent extends NativeScrollEvent {
   doNotPropagate?: boolean;
 }
 
+export enum MasonryFlashListType {
+  Item = "item",
+  Header = "header",
+}
+
 export interface MasonryListItem<T> {
   originalIndex: number;
   originalItem: T;
+  type: MasonryFlashListType;
+  sectionIndex?: number;
 }
 
-/**
- * MasonryFlashListRef with support for scroll related methods
- */
 export interface MasonryFlashListRef<T> {
   scrollToOffset: FlashList<T>["scrollToOffset"];
   scrollToEnd: FlashList<T>["scrollToEnd"];
   getScrollableNode: FlashList<T>["getScrollableNode"];
 }
 
-/**
- * FlashList variant that enables rendering of masonry layouts.
- * If you want `MasonryFlashList` to optimize item arrangement, enable `optimizeItemArrangement` and pass a valid `overrideItemLayout` function.
- */
 const MasonryFlashListComponent = React.forwardRef(
-  <T,>(
-    /**
-     * Forward Ref will force cast generic parament T to unknown. Export has a explicit cast to solve this.
-     */
+  <T extends { type: MasonryFlashListType; originalItem: any; originalIndex: number; sectionIndex?: number }>(
     props: MasonryFlashListProps<T>,
     forwardRef: React.ForwardedRef<MasonryFlashListRef<T>>
   ) => {
@@ -104,10 +92,28 @@ const MasonryFlashListComponent = React.forwardRef(
         ExceptionList.overrideItemLayoutRequiredForMasonryOptimization
       );
     }
+
+    const flatData = useMemo(() => {
+      return props.sections.flatMap((section, sectionIndex) => [
+        {
+          type: MasonryFlashListType.Header,
+          originalItem: section.title,
+          originalIndex: -1,
+          sectionIndex,
+        } as T,
+        ...section.data.map((item, index) => ({
+          type: MasonryFlashListType.Item,
+          originalItem: item,
+          originalIndex: index,
+          sectionIndex,
+        } as T)),
+      ]);
+    }, [props.sections]);
+
     const dataSet = useDataSet(
       columnCount,
       Boolean(props.optimizeItemArrangement),
-      props.data,
+      flatData,
       props.overrideItemLayout,
       props.extraData
     );
@@ -143,11 +149,6 @@ const MasonryFlashListComponent = React.forwardRef(
       }
     ).current;
 
-    /**
-     * We're triggering an onScroll on internal lists so that they register the correct offset which is offset - header size.
-     * This will make sure viewability callbacks are triggered correctly.
-     * 32 ms is equal to two frames at 60 fps. Faster framerates will not cause any problems.
-     */
     const onLoadForNestedLists = useRef((args: { elapsedTimeInMs: number }) => {
       setTimeout(() => {
         emptyScrollEvent.nativeEvent.doNotPropagate = true;
@@ -173,6 +174,7 @@ const MasonryFlashListComponent = React.forwardRef(
       stickyHeaderIndices,
       CellRendererComponent,
       ItemSeparatorComponent,
+      renderSectionHeader,
       ...remainingProps
     } = props;
 
@@ -203,6 +205,12 @@ const MasonryFlashListComponent = React.forwardRef(
               data={args.item}
               onLoad={args.index === 0 ? onLoadForNestedLists : undefined}
               renderItem={(innerArgs) => {
+                const item = innerArgs.item;
+                if (item.type === MasonryFlashListType.Header) {
+                  return renderSectionHeader({
+                    section: props.sections[item.sectionIndex!],
+                  });
+                }
                 return (
                   renderItem?.({
                     ...innerArgs,
@@ -216,22 +224,22 @@ const MasonryFlashListComponent = React.forwardRef(
               keyExtractor={
                 keyExtractor
                   ? (item, _) => {
-                      return keyExtractor?.(
-                        item.originalItem,
-                        item.originalIndex
-                      );
-                    }
+                    return keyExtractor?.(
+                      item.originalItem,
+                      item.originalIndex
+                    );
+                  }
                   : undefined
               }
               getItemType={
                 getItemType
                   ? (item, _, extraData) => {
-                      return getItemType?.(
-                        item.originalItem,
-                        item.originalIndex,
-                        extraData
-                      );
-                    }
+                    return getItemType?.(
+                      item.originalItem,
+                      item.originalIndex,
+                      extraData
+                    );
+                  }
                   : undefined
               }
               drawDistance={drawDistance}
@@ -256,24 +264,24 @@ const MasonryFlashListComponent = React.forwardRef(
               onViewableItemsChanged={
                 onViewableItemsChanged
                   ? (info) => {
-                      updateViewTokens(info.viewableItems);
-                      updateViewTokens(info.changed);
-                      onViewableItemsChanged?.(info);
-                    }
+                    updateViewTokens(info.viewableItems);
+                    updateViewTokens(info.changed);
+                    onViewableItemsChanged?.(info);
+                  }
                   : undefined
               }
               overrideItemLayout={
                 overrideItemLayout
                   ? (layout, item, _, __, extraData) => {
-                      overrideItemLayout?.(
-                        layout,
-                        item.originalItem,
-                        item.originalIndex,
-                        columnCount,
-                        extraData
-                      );
-                      layout.span = undefined;
-                    }
+                    overrideItemLayout?.(
+                      layout,
+                      item.originalItem,
+                      item.originalIndex,
+                      columnCount,
+                      extraData
+                    );
+                    layout.span = undefined;
+                  }
                   : undefined
               }
             />
@@ -282,11 +290,11 @@ const MasonryFlashListComponent = React.forwardRef(
         overrideItemLayout={
           getColumnFlex
             ? (layout, item, index, maxColumns, extraData) => {
-                layout.span =
-                  (columnCount *
-                    getColumnFlex(item, index, maxColumns, extraData)) /
-                  totalColumnFlex;
-              }
+              layout.span =
+                (columnCount *
+                  getColumnFlex(item, index, maxColumns, extraData)) /
+                totalColumnFlex;
+            }
             : undefined
         }
       />
@@ -294,10 +302,7 @@ const MasonryFlashListComponent = React.forwardRef(
   }
 );
 
-/**
- * Splits data for each column's FlashList
- */
-const useDataSet = <T,>(
+const useDataSet = <T extends { type: MasonryFlashListType; originalItem: any; originalIndex: number; sectionIndex?: number }>(
   columnCount: number,
   optimizeItemArrangement: boolean,
   sourceData?: FlashListProps<T>["data"],
@@ -324,7 +329,6 @@ const useDataSet = <T,>(
             nextColumnIndex = j;
           }
         }
-        // update height of column
         layoutObject.size = undefined;
         overrideItemLayout!(
           layoutObject,
@@ -337,16 +341,17 @@ const useDataSet = <T,>(
           layoutObject.size ?? defaultEstimatedItemSize;
       }
       dataSet[nextColumnIndex].push({
-        originalItem: sourceData[i],
-        originalIndex: i,
+        originalItem: sourceData[i].originalItem,
+        originalIndex: sourceData[i].originalIndex,
+        type: sourceData[i].type,
+        sectionIndex: sourceData[i].sectionIndex,
       });
     }
     return dataSet;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceData, columnCount, optimizeItemArrangement, extraData]);
 };
 
-const useTotalColumnFlex = <T,>(
+const useTotalColumnFlex = <T extends { type: MasonryFlashListType; originalItem: any; originalIndex: number; sectionIndex?: number }>(
   dataSet: MasonryListItem<T>[][],
   props: MasonryFlashListProps<T>
 ): number => {
@@ -366,13 +371,9 @@ const useTotalColumnFlex = <T,>(
       );
     }
     return totalFlexSum;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataSet, props.getColumnFlex, props.extraData]);
 };
 
-/**
- * Handle both function refs and refs with current property
- */
 const useRefWithForwardRef = <T,>(
   forwardRef: any
 ): [React.MutableRefObject<T | null>, (instance: T | null) => void] => {
@@ -393,10 +394,6 @@ const useRefWithForwardRef = <T,>(
   ];
 };
 
-/**
- * This ScrollView is actually just a view mimicking a scrollview. We block the onScroll event from being passed to the parent list directly.
- * We manually drive onScroll from the parent and thus, achieve recycling.
- */
 const getFlashListScrollView = (
   onScrollRef: React.RefObject<OnScrollCallback[]>,
   getParentHeight: () => number
@@ -437,6 +434,7 @@ const getFlashListScrollView = (
   FlashListScrollView.displayName = "FlashListScrollView";
   return FlashListScrollView;
 };
+
 const updateViewTokens = (tokens: ViewToken[]) => {
   const length = tokens.length;
   for (let i = 0; i < length; i++) {
@@ -458,18 +456,16 @@ const getEmptyScrollEvent = () => {
     nativeEvent: { contentOffset: { y: 0, x: 0 } },
   };
 };
+
 const getListRenderedSize = <T,>(
   parentFlashList: React.MutableRefObject<FlashList<T[]> | null>
 ) => {
   return parentFlashList?.current?.recyclerlistview_unsafe?.getRenderedSize();
 };
+
 MasonryFlashListComponent.displayName = "MasonryFlashList";
 
-/**
- * FlashList variant that enables rendering of masonry layouts.
- * If you want `MasonryFlashList` to optimize item arrangement, enable `optimizeItemArrangement` and pass a valid `overrideItemLayout` function.
- */
-export const MasonryFlashList = MasonryFlashListComponent as <T>(
+export const MasonryFlashList = MasonryFlashListComponent as <T extends { type: MasonryFlashListType; originalItem: any; originalIndex: number; sectionIndex?: number }>(
   props: MasonryFlashListProps<T> & {
     ref?: React.RefObject<MasonryFlashListRef<T>>;
   }
